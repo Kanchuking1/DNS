@@ -8,9 +8,9 @@ constexpr int MAX_DNS_SIZE = 512;
 constexpr int MAX_ATTEMPTS = 3;
 
 // Flags
-constexpr int DNS_QUERY_FLAG = 0;
+constexpr int DNS_QUERY_FLAG = (0 << 15);
 constexpr int DNS_RESPONSE_FLAG = (1 << 15);
-constexpr int DNS_STDQUERY_FLAG = 0;
+constexpr int DNS_STDQUERY_FLAG = (0 << 11);
 constexpr int DNS_AUTHORATIVE_ANSWER_FLAG = (1 << 10);
 constexpr int DNS_TRUNCATED_FLAG = (1 << 9);
 constexpr int DNS_RECURSION_DESIRED_FLAG = (1 << 8);
@@ -57,6 +57,7 @@ public:
 };
 
 class DNSanswerHdr {
+public:
     u_short type;
     u_short headerClass;
     u_int ttl;
@@ -67,7 +68,8 @@ class DNSanswerHdr {
 
 string reverseIP(string ip);
 void makeDNSquestion(char* buf, char* host);
-void connectToDNS();
+int parseQuestions(char* result, FixedDNSheader* resultFdh, char* responseBuffer, char* packet);
+int parseAnswers(char* result, FixedDNSheader* resultFdh, char* responseBuffer, char* packet, int bytes, string sectionName, u_short sectionCount);
 
 int main(int argc, char** argv)
 {
@@ -114,9 +116,9 @@ int main(int argc, char** argv)
     dh->authority = htons(0);
     dh->additional = htons(0);
 
-    printf("Query\t: %s, type %d, TXID 0x%04d\nServer\t: %s\n", 
+    printf("Query\t: %s, type %d, TXID 0x%04d\nServer\t: %s\n",
         lookupString.c_str(),
-        htons(qh->type), 
+        htons(qh->type),
         htons(dh->id),
         dnsIp.c_str());
     printf("********************************\n");
@@ -142,7 +144,6 @@ int main(int argc, char** argv)
             return 0;
         }
 
-        // Bind socket and check for errors
         struct sockaddr_in local;
         memset(&local, 0, sizeof(local));
 
@@ -180,8 +181,10 @@ int main(int argc, char** argv)
         if (available < 0) {
             printf("failed with %d on recv\n", WSAGetLastError());
             break;
-        } else if (available == 0) {
+        }
+        else if (available == 0) {
             printf("timeout in %d ms\n", (int)(1000 * ((double)clock() - (double)timer) / (double)CLOCKS_PER_SEC));
+            continue;
         }
 
         if (available > 0) {
@@ -237,6 +240,51 @@ int main(int argc, char** argv)
                 htons(resultFdh->authority),
                 htons(resultFdh->additional));
 
+            if (resultFdh->id != dh->id) {
+                printf("\t++ invalid reply: TXID mismatch, sent 0x%04x, received 0x%04x\n",
+                    htons(dh->id),
+                    htons(resultFdh->id));
+                WSACleanup();
+                closesocket(sock);
+                delete[] packet;
+                return 0;
+            }
+
+            int Rcode = htons(resultFdh->flags) & 0x000f;
+            if ((Rcode) == 0) {
+                printf("\tsucceeded with Rcode = %d\n", Rcode);
+            }
+            else {
+                printf("\tfailed with Rcode = %d\n", Rcode);
+                delete[] packet;
+                WSACleanup();
+                return 0;
+            }
+
+            int qSize = parseQuestions(result, resultFdh, responseBuffer, packet);
+            if (qSize == 0) {
+                return 0;
+            }
+            result += qSize;
+
+            int ansSize = parseAnswers(result, resultFdh, responseBuffer, packet, bytes, "answers", htons(resultFdh->answers));
+            if (ansSize == 0 && resultFdh->answers > 0) {
+                return 0;
+            }
+            result += ansSize;
+
+            int authSize = parseAnswers(result, resultFdh, responseBuffer, packet, bytes, "authority", htons(resultFdh->authority));
+            if (authSize == 0 && resultFdh->authority > 0) {
+                return 0;
+            }
+            result += authSize;
+
+            int addSize = parseAnswers(result, resultFdh, responseBuffer, packet, bytes, "additional", htons(resultFdh->additional));
+            if (authSize == 0 && resultFdh->authority > 0) {
+                return 0;
+            }
+            result += authSize;
+
             break;
         }
     }
@@ -267,12 +315,229 @@ void makeDNSquestion(char* buf, char* host) {
         currEnd = strchr(hostItr, '.');
         if (currEnd == NULL) {
             currSize = strlen(hostItr);
-        } else {
+        }
+        else {
             currSize = currEnd - hostItr;
         }
         buf[i++] = currSize;
         memcpy(buf + i, hostItr, currSize);
         i += currSize;
-        hostItr = (currEnd)?currEnd + 1:NULL;
+        hostItr = (currEnd != NULL) ? currEnd + 1 : NULL;
+        buf[i] = 0;
     }
+}
+
+int parseQuestions(char* result, FixedDNSheader* resultFdh, char* responseBuffer, char* packet) {
+    // Parse Questions
+    char* startPtr = result;
+    if (htons(resultFdh->questions > 0)) {
+        printf("\t------------ [questions] ----------\n");
+
+        loop(htons(resultFdh->questions)) {
+            string questionOutput = "\t";
+            bool printDot = false;
+
+            while (true) {
+                int blockSize = result[0];
+                if (blockSize == 0) {
+                    questionOutput += " ";
+                    result++;
+                    break;
+                }
+                if (blockSize + result - responseBuffer > MAX_DNS_SIZE) {
+                    printf("\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                    delete[] packet;
+                    WSACleanup();
+                    return false;
+                }
+                if (printDot) {
+                    questionOutput += ".";
+                }
+                else {
+                    printDot = true;
+                }
+                result++;
+                char temp[MAX_DNS_SIZE];
+                memcpy(temp, result, blockSize);
+                temp[blockSize] = '\0';
+                questionOutput += temp;
+                result += blockSize;
+            }
+            printf("%s", questionOutput.c_str());
+            QueryHeader* qh = (QueryHeader*)result;
+            printf("type %d class %d\n", htons(qh->type), htons(qh->headerClass));
+            result += sizeof(QueryHeader);
+        }
+    }
+
+    return result - startPtr;
+}
+
+char* jump(char* responseBuffer, char* result, char* resultHeader, int bytes, bool isDNSAnswer) {
+    if (result[0] == 0) {
+        return result + 1;
+    }
+
+    if ((unsigned char)result[0] >= 0xC0) {
+        // Compressed, so jump
+        int offset = (((unsigned char)result[0] & 0x3F) << 8) + (unsigned char)result[1];
+        bool flag = false;
+        if (responseBuffer + offset - resultHeader > 0 && responseBuffer + offset - resultHeader < sizeof(FixedDNSheader)) {
+            if (isDNSAnswer) {
+                printf("\n");
+            }
+            printf("\t++ Invalid record: jump into fixed DNS header\n");
+            flag = true;
+        }
+        else if (result + 1 - responseBuffer >= bytes) {
+            if (isDNSAnswer) {
+                printf("\n");
+            }
+            printf("\t++ Invalid record: truncated jump offset\n");
+            flag = true;
+        }
+        else if (offset > bytes) {
+            if (isDNSAnswer) {
+                printf("\n");
+            }
+            printf("\t++ Invalid record: jump beyond packet boundary\n");
+            flag = true;
+        }
+        else if (*((unsigned char*)(responseBuffer + offset)) >= 0XC0) {
+            if (isDNSAnswer) {
+                printf("\n");
+            }
+            printf("\t++ Invalid record: jump loop\n");
+            flag = true;
+        }
+
+        if (flag) {
+            WSACleanup();
+            exit(-1);
+        }
+
+        jump(responseBuffer, responseBuffer + offset, resultHeader, bytes, isDNSAnswer);
+        return result + 2;
+    }
+    else {
+        // uncompressed, read next word
+        int blockSize = result[0];
+        if (blockSize == 0) {
+            return 0;
+        }
+        result++;
+
+        if (result + blockSize - responseBuffer >= bytes) {
+            if (isDNSAnswer) {
+                printf("\n");
+            }
+
+            // Output error statement
+            printf("\t++ Invalid record: truncated name\n");
+
+            // Cleanup and exit the program
+            WSACleanup();
+            exit(0);
+        }
+        
+        char temp = result[blockSize];
+        result[blockSize] = '\0';
+        
+        printf("%s", result);
+
+        result[blockSize] = temp;
+        result += blockSize;
+
+        if (result[0] != 0) {
+            printf(".");
+        }
+        else {
+            printf(" ");
+        }
+
+        result = jump(responseBuffer, result, resultHeader, bytes, isDNSAnswer);
+        return result;
+    }
+}
+
+int parseAnswers(char* result, FixedDNSheader* resultFdh, char* responseBuffer, char* packet, int bytes, string sectionName, u_short sectionCount) {
+    char* startPtr = result;
+    if (sectionCount > 0) {
+        printf("\t------------ [%s] ------------\n", sectionName.c_str());
+
+        loop(sectionCount) {
+            if (result - responseBuffer >= bytes) {
+                printf("\t++ Invalid section: not enough records\n");
+                WSACleanup();
+                delete packet;
+                return 0;
+            }
+
+            if (result + (int)sizeof(DNSanswerHdr) - responseBuffer > bytes) {
+                printf("\t++ Invalid record: truncated RR answer header\n");
+                WSACleanup();
+                delete packet;
+                return 0;
+            }
+
+            char* resultStart = strstr(responseBuffer, packet);
+            printf("\t");
+            result = jump(responseBuffer, result, resultStart, bytes, false);
+            DNSanswerHdr* dah = (DNSanswerHdr*)result;
+            result += sizeof(DNSanswerHdr);
+
+            int answerType = (int)htons(dah->type);
+
+            switch (answerType) {
+            case DNS_TYPE_A:
+                printf("A ");
+                if (result + (int)htons(dah->len) - responseBuffer > bytes) {
+                    printf("\n\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                    delete packet;
+                    return 0;
+                }
+
+                printf("%d.", 16 * (unsigned char(result[0]) >> 4) + (unsigned char(result[0]) & 0x0f));
+                printf("%d.", 16 * (unsigned char(result[1]) >> 4) + (unsigned char(result[1]) & 0x0f));
+                printf("%d.", 16 * (unsigned char(result[2]) >> 4) + (unsigned char(result[2]) & 0x0f));
+                printf("%d ", 16 * (unsigned char(result[3]) >> 4) + (unsigned char(result[3]) & 0x0f));
+
+                printf(" TTL = %d\n", htonl(dah->ttl));
+                result += 4;
+                break;
+            case DNS_TYPE_PTR:
+                printf("PTR ");
+                if (result + (int)htons(dah->len) - responseBuffer > bytes) {
+                    printf("\n\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                    delete packet;
+                    return false;
+                }
+                result = jump(responseBuffer, result, resultStart, bytes, true);
+                printf(" TTL = %d\n", (int)htonl(dah->ttl));
+                break;
+            case DNS_TYPE_NS:
+                printf("NS ");
+                if (result + (int)htons(dah->len) - responseBuffer > bytes) {
+                    printf("\n\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                    delete packet;
+                    return false;
+                }
+                result = jump(responseBuffer, result, resultStart, bytes, true);
+                printf(" TTL = %d\n", (int)htonl(dah->ttl));
+                break;
+            case DNS_TYPE_CNAME:
+                printf("CNAME ");
+                if (result + (int)htons(dah->len) - responseBuffer > bytes) {
+                    printf("\n\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                    delete packet;
+                    return false;
+                }
+                result = jump(responseBuffer, result, resultStart, bytes, true);
+                printf(" TTL = %d\n", (int)htonl(dah->ttl));
+                break;
+            }
+        }
+    }
+
+    return result - startPtr;
 }
