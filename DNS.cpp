@@ -225,7 +225,7 @@ int main(int argc, char** argv)
             FixedDNSheader* resultFdh = (FixedDNSheader*)responseBuffer;
 
             if (bytes < sizeof(FixedDNSheader)) {
-                printf("\t++ Invalid reply: packet smaller than fixed DNS Header\n");
+                printf("\n\t++\tInvalid reply: packet smaller than fixed DNS Header\n");
                 WSACleanup();
                 closesocket(sock);
                 delete[] packet;
@@ -241,7 +241,7 @@ int main(int argc, char** argv)
                 htons(resultFdh->additional));
 
             if (resultFdh->id != dh->id) {
-                printf("\t++ invalid reply: TXID mismatch, sent 0x%04x, received 0x%04x\n",
+                printf("\n\t++ invalid reply: TXID mismatch, sent 0x%04x, received 0x%04x\n",
                     htons(dh->id),
                     htons(resultFdh->id));
                 WSACleanup();
@@ -334,7 +334,7 @@ int parseQuestions(char* result, FixedDNSheader* resultFdh, char* responseBuffer
         printf("\t------------ [questions] ----------\n");
 
         loop(htons(resultFdh->questions)) {
-            string questionOutput = "\t";
+            string questionOutput = "\t\t";
             bool printDot = false;
 
             while (true) {
@@ -345,7 +345,7 @@ int parseQuestions(char* result, FixedDNSheader* resultFdh, char* responseBuffer
                     break;
                 }
                 if (blockSize + result - responseBuffer > MAX_DNS_SIZE) {
-                    printf("\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                    printf("\n\t++\tInvalid record: RR value length stretches the answer beyond the packet\n");
                     delete[] packet;
                     WSACleanup();
                     return false;
@@ -373,7 +373,7 @@ int parseQuestions(char* result, FixedDNSheader* resultFdh, char* responseBuffer
     return result - startPtr;
 }
 
-char* jump(char* responseBuffer, char* result, char* resultHeader, int bytes, bool isDNSAnswer) {
+char* jump(char* responseBuffer, char* result, char* resultHeader, int bytes) {
     if (result[0] == 0) {
         return result + 1;
     }
@@ -383,31 +383,19 @@ char* jump(char* responseBuffer, char* result, char* resultHeader, int bytes, bo
         int offset = (((unsigned char)result[0] & 0x3F) << 8) + (unsigned char)result[1];
         bool flag = false;
         if (responseBuffer + offset - resultHeader > 0 && responseBuffer + offset - resultHeader < sizeof(FixedDNSheader)) {
-            if (isDNSAnswer) {
-                printf("\n");
-            }
-            printf("\t++ Invalid record: jump into fixed DNS header\n");
+            printf("\n\t++\tInvalid record: jump into fixed DNS header\n");
             flag = true;
         }
         else if (result + 1 - responseBuffer >= bytes) {
-            if (isDNSAnswer) {
-                printf("\n");
-            }
-            printf("\t++ Invalid record: truncated jump offset\n");
+            printf("\n\t++\tInvalid record: truncated jump offset\n");
             flag = true;
         }
         else if (offset > bytes) {
-            if (isDNSAnswer) {
-                printf("\n");
-            }
-            printf("\t++ Invalid record: jump beyond packet boundary\n");
+            printf("\n\t++\tInvalid record: jump beyond packet boundary\n");
             flag = true;
         }
         else if (*((unsigned char*)(responseBuffer + offset)) >= 0XC0) {
-            if (isDNSAnswer) {
-                printf("\n");
-            }
-            printf("\t++ Invalid record: jump loop\n");
+            printf("\n\t++\tInvalid record: jump loop\n");
             flag = true;
         }
 
@@ -416,7 +404,7 @@ char* jump(char* responseBuffer, char* result, char* resultHeader, int bytes, bo
             exit(-1);
         }
 
-        jump(responseBuffer, responseBuffer + offset, resultHeader, bytes, isDNSAnswer);
+        jump(responseBuffer, responseBuffer + offset, resultHeader, bytes);
         return result + 2;
     }
     else {
@@ -428,21 +416,14 @@ char* jump(char* responseBuffer, char* result, char* resultHeader, int bytes, bo
         result++;
 
         if (result + blockSize - responseBuffer >= bytes) {
-            if (isDNSAnswer) {
-                printf("\n");
-            }
-
-            // Output error statement
-            printf("\t++ Invalid record: truncated name\n");
-
-            // Cleanup and exit the program
+            printf("\n\t++\tInvalid record: truncated name\n");
             WSACleanup();
             exit(0);
         }
-        
+
         char temp = result[blockSize];
         result[blockSize] = '\0';
-        
+
         printf("%s", result);
 
         result[blockSize] = temp;
@@ -455,7 +436,7 @@ char* jump(char* responseBuffer, char* result, char* resultHeader, int bytes, bo
             printf(" ");
         }
 
-        result = jump(responseBuffer, result, resultHeader, bytes, isDNSAnswer);
+        result = jump(responseBuffer, result, resultHeader, bytes);
         return result;
     }
 }
@@ -467,22 +448,22 @@ int parseAnswers(char* result, FixedDNSheader* resultFdh, char* responseBuffer, 
 
         loop(sectionCount) {
             if (result - responseBuffer >= bytes) {
-                printf("\t++ Invalid section: not enough records\n");
+                printf("\n\t++\tInvalid section: not enough records\n");
                 WSACleanup();
                 delete packet;
                 return 0;
             }
 
             if (result + (int)sizeof(DNSanswerHdr) - responseBuffer > bytes) {
-                printf("\t++ Invalid record: truncated RR answer header\n");
+                printf("\n\t++\tInvalid record: truncated RR answer header\n");
                 WSACleanup();
                 delete packet;
                 return 0;
             }
 
             char* resultStart = strstr(responseBuffer, packet);
-            printf("\t");
-            result = jump(responseBuffer, result, resultStart, bytes, false);
+            printf("\t\t");
+            result = jump(responseBuffer, result, resultStart, bytes);
             DNSanswerHdr* dah = (DNSanswerHdr*)result;
             result += sizeof(DNSanswerHdr);
 
@@ -492,7 +473,7 @@ int parseAnswers(char* result, FixedDNSheader* resultFdh, char* responseBuffer, 
             case DNS_TYPE_A:
                 printf("A ");
                 if (result + (int)htons(dah->len) - responseBuffer > bytes) {
-                    printf("\n\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                    printf("\n\t++\tInvalid record: RR value length stretches the answer beyond the packet\n");
                     delete packet;
                     return 0;
                 }
@@ -508,31 +489,31 @@ int parseAnswers(char* result, FixedDNSheader* resultFdh, char* responseBuffer, 
             case DNS_TYPE_PTR:
                 printf("PTR ");
                 if (result + (int)htons(dah->len) - responseBuffer > bytes) {
-                    printf("\n\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                    printf("\n\t++\tInvalid record: RR value length stretches the answer beyond the packet\n");
                     delete packet;
                     return false;
                 }
-                result = jump(responseBuffer, result, resultStart, bytes, true);
+                result = jump(responseBuffer, result, resultStart, bytes);
                 printf(" TTL = %d\n", (int)htonl(dah->ttl));
                 break;
             case DNS_TYPE_NS:
                 printf("NS ");
                 if (result + (int)htons(dah->len) - responseBuffer > bytes) {
-                    printf("\n\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                    printf("\n\t++\tInvalid record: RR value length stretches the answer beyond the packet\n");
                     delete packet;
                     return false;
                 }
-                result = jump(responseBuffer, result, resultStart, bytes, true);
+                result = jump(responseBuffer, result, resultStart, bytes);
                 printf(" TTL = %d\n", (int)htonl(dah->ttl));
                 break;
             case DNS_TYPE_CNAME:
                 printf("CNAME ");
                 if (result + (int)htons(dah->len) - responseBuffer > bytes) {
-                    printf("\n\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                    printf("\n\t++\tInvalid record: RR value length stretches the answer beyond the packet\n");
                     delete packet;
                     return false;
                 }
-                result = jump(responseBuffer, result, resultStart, bytes, true);
+                result = jump(responseBuffer, result, resultStart, bytes);
                 printf(" TTL = %d\n", (int)htonl(dah->ttl));
                 break;
             }
